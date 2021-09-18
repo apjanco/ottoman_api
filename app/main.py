@@ -1,5 +1,4 @@
 from datetime import datetime
-from fastapi import FastAPI
 from pathlib import Path
 from cassis import Cas
 import spacy
