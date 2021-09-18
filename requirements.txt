@@ -1,4 +1,4 @@
 stanza
 spacy_stanza
-cassis 
+dkpro-cassis 
 flask
