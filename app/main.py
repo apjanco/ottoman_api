@@ -1,43 +1,155 @@
-from datetime import datetime
-from fastapi import FastAPI
-from pathlib import Path
-from cassis import Cas
-import spacy
+# adapted from https://github.com/inception-project/external-recommender-spacy
+import base64
+from collections import namedtuple
+import sys
+from typing import Any, Dict
+
+from flask import Flask, request, jsonify
+
+from cassis import *
+
 import stanza    
 import spacy_stanza
-from spacy.tokens import Doc
 
-from ariadne.classifier import Classifier
-from ariadne.contrib.inception_util import create_prediction, TOKEN_TYPE
-from ariadne.contrib.spacy import SpacyNerClassifier, SpacyPosClassifier
-from ariadne.server import Server
+# Types
 
+JsonDict = Dict[str, Any]
+
+PredictionRequest = namedtuple("PredictionRequest", ["layer", "feature", "projectId", "document", "typeSystem"])
+PredictionResponse = namedtuple("PredictionResponse", ["document"])
+Document = namedtuple("Document", ["xmi", "documentId", "userId"])
+
+# Constants
+
+SENTENCE_TYPE = "de.tudarmstadt.ukp.dkpro.core.api.segmentation.type.Sentence"
+TOKEN_TYPE = "de.tudarmstadt.ukp.dkpro.core.api.segmentation.type.Token"
+IS_PREDICTION = "inception_internal_predicted"
+
+# Models
 stanza.download("tr")
+nlp = spacy_stanza.load_pipeline("tr")
+
+# Routes
+
+app = Flask(__name__)
 
 
-class SpacyPosClassifier(Classifier):
-    def __init__(self, model_name: str):
-        super().__init__()
-        self._model = spacy_stanza.load_pipeline("tr")
+@app.route("/ner/predict", methods=["POST"])
+def route_predict_ner():
+    json_data = request.get_json()
 
-    def predict(self, cas: Cas, layer: str, feature: str, project_id: str, document_id: str, user_id: str):
-        # Extract the tokens from the CAS and create a spacy doc from it
-        words = [cas.get_covered_text(cas_token) for cas_token in cas.select(TOKEN_TYPE)]
+    prediction_request = parse_prediction_request(json_data)
+    prediction_response = predict_ner(prediction_request)
 
-        doc = Doc(self._model.vocab, words=words)
+    result = jsonify(document=prediction_response.document)
 
-        # Get the pos tags
-        self._model.get_pipe("tok2vec")(doc)
-        self._model.get_pipe("tagger")(doc)
-
-        # For every token, extract the POS tag and create an annotation in the CAS
-        for cas_token, spacy_token in zip(cas.select(TOKEN_TYPE), doc):
-            prediction = create_prediction(cas, layer, feature, cas_token.begin, cas_token.end, spacy_token.tag_)
-            cas.add_annotation(prediction)
+    return result
 
 
-server = Server()
-server.add_classifier("spacy_ner", SpacyNerClassifier("en_core_web_sm"))
-server.add_classifier("spacy_pos", SpacyPosClassifier("en_core_web_sm"))
+@app.route("/ner/train", methods=["POST"])
+def route_train_ner():
+    # Return empty response
+    return ('', 204)
 
-server.start()
+
+@app.route("/pos/predict", methods=["POST"])
+def route_predict_pos():
+    json_data = request.get_json()
+
+    prediction_request = parse_prediction_request(json_data)
+    prediction_response = predict_pos(prediction_request)
+
+    result = jsonify(document=prediction_response.document)
+
+    return result
+
+
+@app.route("/pos/train", methods=["POST"])
+def route_train_pos():
+    # Return empty response
+    return ('', 204)
+
+
+def parse_prediction_request(json_object: JsonDict) -> PredictionRequest:
+    metadata = json_object["metadata"]
+    document = json_object["document"]
+
+    layer = metadata["layer"]
+    feature = metadata["feature"]
+    projectId = metadata["projectId"]
+
+    xmi = document["xmi"]
+    documentId = document["documentId"]
+    userId = document["userId"]
+    typesystem = json_object["typeSystem"]
+
+    return PredictionRequest(layer, feature, projectId, Document(xmi, documentId, userId), typesystem)
+
+
+# NLP
+
+def predict_ner(prediction_request: PredictionRequest) -> PredictionResponse:
+    # Load the CAS and type system from the request
+    typesystem = load_typesystem(prediction_request.typeSystem)
+    cas = load_cas_from_xmi(prediction_request.document.xmi, typesystem=typesystem)
+    AnnotationType = typesystem.get_type(prediction_request.layer)
+
+    # Extract the tokens from the CAS and create a spacy doc from it
+    tokens = list(cas.select(TOKEN_TYPE))
+    words = [cas.get_covered_text(token) for token in tokens]
+    doc = Doc(nlp.vocab, words=words)
+
+    # Find the named entities
+    nlp.entity(doc)
+
+    # For every entity returned by spacy, create an annotation in the CAS
+    for ent in doc.ents:
+        fields = {'begin': tokens[ent.start].begin,
+                  'end': tokens[ent.end - 1].end,
+                  IS_PREDICTION: True,
+                  prediction_request.feature: ent.label_}
+        annotation = AnnotationType(**fields)
+        cas.add_annotation(annotation)
+
+    xmi = cas.to_xmi()
+    return PredictionResponse(xmi)
+
+
+def predict_pos(prediction_request: PredictionRequest) -> PredictionResponse:
+    # Load the CAS and type system from the request
+    typesystem = load_typesystem(prediction_request.typeSystem)
+    cas = load_cas_from_xmi(prediction_request.document.xmi, typesystem=typesystem)
+    AnnotationType = typesystem.get_type(prediction_request.layer)
+
+    # Extract the tokens from the CAS and create a spacy doc from it
+    tokens = list(cas.select(TOKEN_TYPE))
+    words = [cas.get_covered_text(token) for token in tokens]
+    doc = Doc(nlp.vocab, words=words)
+
+    # Do the tagging
+    nlp.tagger(doc)
+
+    # For every token, extract the POS tag and create an annotation in the CAS
+    for token in doc:
+        fields = {'begin': tokens[token.i].begin,
+                  'end': tokens[token.i].end,
+                  IS_PREDICTION: True,
+                  prediction_request.feature: token.pos_}
+        annotation = AnnotationType(**fields)
+        cas.add_annotation(annotation)
+
+    xmi = cas.to_xmi()
+    return PredictionResponse(xmi)
+
+
+if __name__ == "__main__":
+    app.run(debug=True, host='0.0.0.0')
+    """
+    # For debugging purposes, load a json file containing the request and process it.
+    import json
+    with open("predict.json", "rb") as f:
+        predict_json = json.load(f)
+
+    request = parse_prediction_request(predict_json)
+    predict_pos(request)
+    """

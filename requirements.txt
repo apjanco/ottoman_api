@@ -1,6 +1,4 @@
-fastapi==0.61.1
-pytz==2019.3
-uvicorn==0.11.8
 stanza
 spacy_stanza
-git+git://github.com/inception-project/inception-external-recommender
+cassis 
+flask
