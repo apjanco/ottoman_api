@@ -67,6 +67,17 @@ def route_predict_pos():
     return result
 
 
+@app.route("/lemma/predict", methods=["POST"])
+def route_predict_lemma():
+    json_data = request.get_json()
+
+    prediction_request = parse_prediction_request(json_data)
+    prediction_response = predict_lemma(prediction_request)
+
+    result = jsonify(document=prediction_response.document)
+
+    return result
+
 @app.route("/pos/train", methods=["POST"])
 def route_train_pos():
     # Return empty response
@@ -126,11 +137,8 @@ def predict_pos(prediction_request: PredictionRequest) -> PredictionResponse:
 
     # Extract the tokens from the CAS and create a spacy doc from it
     tokens = list(cas.select(TOKEN_TYPE))
-    words = [cas.get_covered_text(token) for token in tokens]
-    doc = Doc(nlp.vocab, words=words)
-
-    # Do the tagging
-    nlp.tagger(doc)
+    words = ' '.join([cas.get_covered_text(token) for token in tokens])
+    doc = nlp(words)
 
     # For every token, extract the POS tag and create an annotation in the CAS
     for token in doc:
@@ -138,6 +146,29 @@ def predict_pos(prediction_request: PredictionRequest) -> PredictionResponse:
                   'end': tokens[token.i].end,
                   IS_PREDICTION: True,
                   prediction_request.feature: token.pos_}
+        annotation = AnnotationType(**fields)
+        cas.add_annotation(annotation)
+
+    xmi = cas.to_xmi()
+    return PredictionResponse(xmi)
+
+def predict_lemma(prediction_request: PredictionRequest) -> PredictionResponse:
+    # Load the CAS and type system from the request
+    typesystem = load_typesystem(prediction_request.typeSystem)
+    cas = load_cas_from_xmi(prediction_request.document.xmi, typesystem=typesystem)
+    AnnotationType = typesystem.get_type(prediction_request.layer)
+
+    # Extract the tokens from the CAS and create a spacy doc from it
+    tokens = list(cas.select(TOKEN_TYPE))
+    words = ' '.join([cas.get_covered_text(token) for token in tokens])
+    doc = nlp(words)
+
+    # For every token, extract the POS tag and create an annotation in the CAS
+    for token in doc:
+        fields = {'begin': tokens[token.i].begin,
+                  'end': tokens[token.i].end,
+                  IS_PREDICTION: True,
+                  prediction_request.feature: token.lemma_}
         annotation = AnnotationType(**fields)
         cas.add_annotation(annotation)
 
