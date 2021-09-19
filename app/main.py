@@ -8,7 +8,10 @@ from flask import Flask, request, jsonify
 
 from cassis import *
 
-import stanza    
+import spacy
+from spacy.tokens import Doc
+
+import stanza
 import spacy_stanza
 
 # Types
